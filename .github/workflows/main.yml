@@ -1,0 +1,151 @@
+name: Windows RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          $username = "RDPUser"
+          $password = "${{ secrets.RDP_PASSWORD }}"
+
+          if ([string]::IsNullOrWhiteSpace($password)) {
+            Write-Error "RDP_PASSWORD secret is missing."
+            exit 1
+          }
+
+          $securePassword = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
+
+          $user = Get-LocalUser `
+            -Name $username `
+            -ErrorAction SilentlyContinue
+
+          if ($user) {
+            Write-Host "RDPUser already exists. Updating password..."
+
+            Set-LocalUser `
+              -Name $username `
+              -Password $securePassword
+          }
+          else {
+            Write-Host "Creating RDPUser..."
+
+            New-LocalUser `
+              -Name $username `
+              -Password $securePassword `
+              -PasswordNeverExpires `
+              -AccountNeverExpires `
+              -Description "Temporary RDP User"
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop"
+
+          Set-Service `
+            -Name TermService `
+            -StartupType Automatic
+
+          Start-Service `
+            -Name TermService
+
+          Write-Host ""
+          Write-Host "RDP CONFIGURATION COMPLETE"
+
+      - name: Get Tailscale IP
+        shell: powershell
+        run: |
+          $ip = tailscale ip -4
+
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+            Write-Error "Tailscale IPv4 was not found."
+            exit 1
+          }
+
+          "TAILSCALE_IP=$ip" |
+            Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "       TEMPORARY RDP READY"
+          Write-Host "========================================"
+          Write-Host "RDP Address: $ip`:3389"
+          Write-Host "Username: RDPUser"
+          Write-Host "Password: Your RDP_PASSWORD Secret"
+          Write-Host "========================================"
+
+      - name: Check RDP
+        shell: powershell
+        run: |
+          Write-Host "TermService status:"
+          Get-Service TermService
+
+          Write-Host ""
+          Write-Host "Checking TCP 3389..."
+
+          $listener = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+
+          if ($listener) {
+            Write-Host ""
+            Write-Host "TCP 3389 IS LISTENING."
+            Write-Host ""
+
+            $listener |
+              Format-Table `
+              LocalAddress,
+              LocalPort,
+              State,
+              OwningProcess `
+              -AutoSize
+          }
+          else {
+            Write-Error "TCP 3389 is NOT listening."
+            exit 1
+          }
+
+      - name: Keep RDP Alive
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "          RDP IS NOW ACTIVE"
+          Write-Host "========================================"
+          Write-Host "Keep this GitHub Actions job running."
+          Write-Host ""
+
+          while ($true) {
+            $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+            Write-Host "[$time] RDP 3389 is active."
+
+            Start-Sleep -Seconds 60
+          }
